@@ -1,35 +1,35 @@
+# modules/security/main.tf - production ready
 resource "yandex_vpc_security_group" "k8s_main" {
   name        = "${var.name_prefix}-k8s-main"
   description = "Main security group for K8s cluster"
   network_id  = var.network_id
   labels      = var.tags
 
-  # Health checks from load balancer
+  # Load balancer health checks - точные подсети
   ingress {
-    description       = "Load balancer health checks"
-    protocol          = "TCP"
-    v4_cidr_blocks    = ["198.18.235.0/24", "198.18.248.0/24"]
-    predefined_target = "loadbalancer_healthchecks"
-    from_port         = 0
-    to_port           = 65535
+    description    = "YC Load Balancer health checks"
+    protocol       = "TCP"
+    v4_cidr_blocks = ["198.18.235.0/24", "198.18.248.0/24"]
+    from_port      = 0
+    to_port        = 65535
   }
 
-  # Kubernetes API access
+  # Kubernetes API - ограниченный доступ
   ingress {
     description    = "K8s API HTTPS"
     protocol       = "TCP"
-    v4_cidr_blocks = ["0.0.0.0/0"]
+    v4_cidr_blocks = var.allowed_api_cidrs
     port           = 443
   }
 
   ingress {
-    description    = "K8s API"
+    description    = "K8s API insecure (если необходимо)"
     protocol       = "TCP"
-    v4_cidr_blocks = ["0.0.0.0/0"]
+    v4_cidr_blocks = var.allowed_api_cidrs
     port           = 6443
   }
 
-  # Internal cluster communication
+  # Внутренняя связь кластера
   ingress {
     description       = "Cluster internal communication"
     protocol          = "ANY"
@@ -38,23 +38,42 @@ resource "yandex_vpc_security_group" "k8s_main" {
     to_port           = 65535
   }
 
-  # Pod-to-pod communication
+  # Pod-to-pod network
   ingress {
-    description    = "Pod-to-pod communication"
+    description    = "Pod network communication"
     protocol       = "ANY"
-    v4_cidr_blocks = [var.vpc_cidr]
+    v4_cidr_blocks = [var.pod_cidr]
     from_port      = 0
     to_port        = 65535
   }
 
-  # ICMP for debugging
+  # Service network
+  ingress {
+    description    = "Service network communication"
+    protocol       = "ANY"
+    v4_cidr_blocks = [var.service_cidr]
+    from_port      = 0
+    to_port        = 65535
+  }
+
+  # ICMP только из приватных сетей
   ingress {
     description    = "ICMP for debugging"
     protocol       = "ICMP"
     v4_cidr_blocks = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
   }
 
-  # All outbound traffic
+  # SSH доступ (если необходим)
+  dynamic "ingress" {
+    for_each = var.enable_ssh ? [1] : []
+    content {
+      description    = "SSH access"
+      protocol       = "TCP"
+      v4_cidr_blocks = var.ssh_allowed_cidrs
+      port           = 22
+    }
+  }
+
   egress {
     description    = "All outbound traffic"
     protocol       = "ANY"
@@ -64,16 +83,50 @@ resource "yandex_vpc_security_group" "k8s_main" {
   }
 }
 
-resource "yandex_vpc_security_group" "k8s_public" {
-  name        = "${var.name_prefix}-k8s-public"
-  description = "Security group for public services"
+# Группа для ingress controller/ALB
+resource "yandex_vpc_security_group" "k8s_ingress" {
+  name        = "${var.name_prefix}-k8s-ingress"
+  description = "Security group for ingress services"
+  network_id  = var.network_id
+  labels      = var.tags
+
+  ingress {
+    description    = "HTTP"
+    protocol       = "TCP"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 80
+  }
+
+  ingress {
+    description    = "HTTPS"
+    protocol       = "TCP"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 443
+  }
+
+  # Health checks от ALB
+  ingress {
+    description    = "ALB health checks"
+    protocol       = "TCP"
+    v4_cidr_blocks = ["198.18.235.0/24", "198.18.248.0/24"]
+    from_port      = 0
+    to_port        = 65535
+  }
+}
+
+# Отдельная группа для NodePort (если используются)
+resource "yandex_vpc_security_group" "k8s_nodeport" {
+  count = var.enable_nodeport ? 1 : 0
+  
+  name        = "${var.name_prefix}-k8s-nodeport"
+  description = "Security group for NodePort services"
   network_id  = var.network_id
   labels      = var.tags
 
   ingress {
     description    = "NodePort services"
     protocol       = "TCP"
-    v4_cidr_blocks = ["0.0.0.0/0"]
+    v4_cidr_blocks = var.nodeport_allowed_cidrs
     from_port      = 30000
     to_port        = 32767
   }
